@@ -1007,13 +1007,16 @@ this coverage needed no new entry there.
 - `backend/child.rs` runs one argv under a deadline and says whether it succeeded, failed or
   never started, which is the whole of what decides a `fail/` marker, see "Thumbnail pool".
 - `backend/thumbs.rs` the bounded, cancellable thumbnail pool, see "Thumbnail pool".
+- `backend/dirsize.rs` recursively totals one requested directory under a deadline and a cancellation flag.
+- `backend/dirsizereq.rs` keeps that work one-at-a-time off the request loop, fills visible cells,
+  and completes a size order with one `dirsorted` reorder after every folder key is known.
 - `backend/proto.rs` the wire types, the request dispatch and the one-line responses.
 - `backend/rows.rs` serialises one window of rows and its per-response Kind dictionary.
 - `backend/thumbreq.rs` the thumbnail request policy: cache lookup, queueing, cancel and
   result reporting, see "Thumbnail requests".
 - `backend/run.rs` the command loop, see "Thumbnail requests". stdin is read on its own
-  thread and the pool answers on its own channel, and a forwarder thread joins the two, so
-  client requests and worker results arrive on one `recv`, because `std` has no `select`.
+  thread, thumbnail and directory-size results arrive on the same event channel, and the loop
+  remains the only writer of stdout, because `std` has no `select`.
 - `backend/events.rs` the `Event` those sources arrive as, and the three threads that join them
   onto the loop's one channel. It came out of `run.rs` at 398 of the 400 hard cap, and it is one
   job: how work reaches the loop, as against what the loop does with it.

@@ -337,7 +337,7 @@ check "hidden true includes both dotfile entries" "5" "$(echo "$out" | head -1 |
 check "the dotfile row is present" "1" "$(echo "$out" | sed -n 2p | grep -c '"n":"\.dotfile"')"
 check "the dot-directory row is present and marked a directory" "1" "$(echo "$out" | sed -n 2p | grep -c '"n":"\.dotdir","d":true')"
 
-# Task 16: directory sizes; each argument is one stage, and the walker only gets a turn between stages once stdin drains to empty, see docs/protocol.md "dirsize".
+# Task 16: directory sizes; each argument is one stage, and queued requests drain before the background walker starts.
 dirsize_run() {
   ( for stage in "$@"; do
       # $(...) strips a stage's trailing newline, so it comes back here or the next stage glues onto this one's last line.
@@ -368,33 +368,43 @@ check "sub's size counts its own entry plus a.txt inside it" "0" "$?"
 out=$(dirsize_run "$(printf '{"c":"list","path":"%s","first":10}\n{"c":"dirsize","rows":[1,99999]}\n' "$DZ")")
 check "a file row and an out-of-range row both answer nothing" "0" "$(echo "$out" | grep -c '"t":"dirsized"')"
 
-# A row already answered is re-answered at once from the cache; staged separately, or two requests sent together would just dedup against the queue instead.
+# A row already answered is re-answered at once from the path cache; staged separately so the first walk completes.
 out=$(dirsize_run \
     "$(printf '{"c":"list","path":"%s","first":10}\n{"c":"dirsize","rows":[0]}\n' "$DZ")" \
     "$(printf '{"c":"dirsize","rows":[0]}\n')")
 check "a repeated ask for an already-answered row still answers" "2" "$(echo "$out" | grep -c '"t":"dirsized"')"
 
-# dirsizecancel carries no rows and drops everything queued; no pacing here on purpose, so the row is cancelled before the walker could ever get a turn.
+# dirsizecancel carries no rows and drops everything queued; no pacing here on purpose, so cancellation wins before the worker starts.
 out=$(printf '{"c":"list","path":"%s","first":10}\n{"c":"dirsize","rows":[0]}\n{"c":"dirsizecancel"}\n{"c":"quit"}\n' "$DZ" | $BIN --backend)
 check "a row cancelled before it was walked is never answered" "0" "$(echo "$out" | grep -c '"t":"dirsized"')"
 
-# list and sort both reassign what a row index names, the same reason a list or a sort clears the thumbnail map, see docs/protocol.md "dirsized".
+# Size sort answers immediately in a stable provisional order, then refreshes and reorders folders once.
 SZ_SB="$FIXTURE_ROOT/flea-dirsize-sort-test-$$"
 SZ="$SZ_SB/tree"
 sandbox_make "$SZ_SB"
-mkdir -p "$SZ"
 mkdir -p "$SZ/aaa" "$SZ/zzz"
-printf 'abc' > "$SZ/aaa/small.txt"
-printf '%050d' 0 > "$SZ/zzz/bigger.txt"
-out=$(dirsize_run \
-    "$(printf '{"c":"list","path":"%s","first":10}\n{"c":"dirsize","rows":[0]}\n' "$SZ")" \
-    "$(printf '{"c":"sort","by":"name","desc":true}\n{"c":"dirsize","rows":[0]}\n')")
-check "a sort still answers a fresh dirsize for the row at its new position" "2" "$(echo "$out" | grep -c '"t":"dirsized"')"
-first_bytes=$(echo "$out" | grep -oE '"bytes":[0-9]+' | head -1 | cut -d: -f2)
-second_bytes=$(echo "$out" | grep -oE '"bytes":[0-9]+' | sed -n 2p | cut -d: -f2)
-# aaa sorts first ascending (the list default) and zzz first descending; a stale cache would repeat aaa's answer.
-[ -n "$first_bytes" ] && [ -n "$second_bytes" ] && [ "$second_bytes" -gt "$first_bytes" ] 2>/dev/null
-check "row 0's answer after the sort is zzz's larger size, not aaa's stale cache entry" "0" "$?"
+printf 'abc' > "$SZ/aaa/changed.txt"
+printf '%050d' 0 > "$SZ/zzz/fifty.txt"
+out=$(
+  {
+    printf '{"c":"list","path":"%s","first":10}\n{"c":"dirsize","rows":[0]}\n' "$SZ"
+    sleep 0.3
+    printf '%0200d' 0 > "$SZ/aaa/changed.txt"
+    printf '{"c":"sort","by":"size","desc":true}\n{"c":"window","start":0,"count":10}\n'
+    sleep 0.3
+    printf '{"c":"window","start":0,"count":10}\n{"c":"dirsize","rows":[0,1]}\n'
+    sleep 0.3
+    printf '{"c":"quit"}\n'
+  } | $BIN --backend
+)
+check "an all-folder size pass announces one final reorder" "1" "$(echo "$out" | grep -c '"t":"dirsorted"')"
+final_rows=$(echo "$out" | grep '"t":"rows"' | sed -n '$p')
+check "recursive sizes override descending name order once complete" "aaa zzz" "$(echo "$final_rows" | row_names)"
+check "the final row order answers both sizes from its completed cache" "3" "$(echo "$out" | grep -c '"t":"dirsized"')"
+first_bytes=$(echo "$out" | grep -oE '"bytes":[0-9]+' | sed -n 1p | cut -d: -f2)
+refreshed_bytes=$(echo "$out" | grep -oE '"bytes":[0-9]+' | sed -n 2p | cut -d: -f2)
+[ -n "$first_bytes" ] && [ -n "$refreshed_bytes" ] && [ "$refreshed_bytes" -gt "$first_bytes" ] 2>/dev/null
+check "the final order uses aaa's contents changed after its first answer" "0" "$?"
 sandbox_remove "$SZ_SB"; sandbox_remove "$DZ_SB"
 
 # A new folder: one mkdir(2), answered like rename and journaled so z removes it; see docs/protocol.md "mkdir".

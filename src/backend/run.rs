@@ -10,7 +10,7 @@ use crate::backend::metareq::spawn as spawn_meta;
 use crate::backend::opsdispatch::{cancel_transfer, do_mkdir, do_newfile, do_rename, do_undo, report_op, resolve_rows, start_duplicate, start_trash, start_transfer, start_menu_transfer, start_redo, Ops};
 use crate::backend::opsreq::OpMsg;
 use crate::backend::mime::Db;
-use crate::backend::dirsizereq::{queue_dirsizes, walk_one_dirsize};
+use crate::backend::dirsizereq::{begin_size_sort, cancel_dirsizes, cancel_viewport, queue_dirsizes, report_done as report_dirsize, start_next as start_next_dirsize};
 use crate::backend::events::{spawn_forwarder, spawn_op_forwarder, spawn_reader, Event};
 use crate::backend::fsinfo::{fsinfo_line, read as read_fsinfo};
 use crate::backend::fsinfo::dev_of;
@@ -73,7 +73,7 @@ pub fn run() -> i32 {
         asked: Vec::new(),
         outstanding: 0,
         dirsizes: HashMap::new(),
-        dirsize_queue: Vec::new(),
+        dirsize_running: None, dirsize_queue: Default::default(), dirsize_sort: None, dirsize_row_generation: 0, dirsize_cache_generation: 0,
         search: None,
         search_reported: Instant::now(),
     };
@@ -94,10 +94,10 @@ pub fn run() -> i32 {
     spawn_op_forwarder(op_rx, tx.clone());
     spawn_reader(tx.clone());
     // Armed before the first request, so no listing is ever answered with nothing watching it.
-    let mut watch = Watch::start(tx);
+    let mut watch = Watch::start(tx.clone());
     loop {
-        // Idle (nothing queued and no walk running) this is exactly the old blocking recv, see docs/protocol.md "dirsize".
-        let event = if st.dirsize_queue.is_empty() && st.search.is_none() {
+        let dirsize_ready = st.dirsize_running.is_none() && !st.dirsize_queue.is_empty();
+        let event = if st.search.is_none() && !dirsize_ready {
             match rx.recv() {
                 Ok(e) => e,
                 Err(_) => break,
@@ -105,8 +105,8 @@ pub fn run() -> i32 {
         } else {
             match rx.try_recv() {
                 Ok(e) => e,
-                // No event waiting, so it is the walker's turn; looping back lets a meanwhile dirsizecancel be seen before the next row.
                 Err(TryRecvError::Empty) => {
+                    start_next_dirsize(&mut out, &mut st, &tx);
                     tick_walkers(&mut out, &mut st, &pool);
                     continue;
                 }
@@ -120,6 +120,7 @@ pub fn run() -> i32 {
                 }
             }
             Event::Thumb(d) => report_done(&mut out, &mut st, d),
+            Event::DirSize(d) => report_dirsize(&mut out, &mut st, d, &tb.mime, &pool),
             // The one line no client asked for, and only ever for the directory being listed now.
             Event::Changed(wd) => {
                 if watch.is_current(wd) {
@@ -195,6 +196,7 @@ fn handle_line(
                     st.listing = l;
                     watch.commit();
                     forget_rows(st, pool);
+                    begin_size_sort(st, line);
                     // Said once per listing, because a folder nobody can watch goes stale in silence.
                     if watch.refused() {
                         eprintln!("flea: {} will not follow outside changes, inotify refused a watch on it", path);
@@ -254,7 +256,8 @@ fn handle_line(
                     writeln!(out, "{}", error_line(&e)).ok();
                 }
                 Ok((pass_ms, sort_ms)) => {
-                    forget_rows(st, pool);
+                    reorder_rows(st, pool);
+                    begin_size_sort(st, line);
                     writeln!(out, "{}", listed_line(st.listing.len(), pass_ms, sort_ms, dev_of(&st.base))).ok();
                 }
             }
@@ -276,13 +279,9 @@ fn handle_line(
                 }
             }
         }
-        Request::DirSize { rows } => {
-            queue_dirsizes(out, st, &rows);
-        }
-        // No rows form: a stale row from a scrolled-past viewport would delay the rows the new one wants, see docs/protocol.md "dirsizecancel".
-        Request::DirSizeCancel => {
-            st.dirsize_queue.clear();
-        }
+        Request::DirSize { rows } => queue_dirsizes(out, st, &rows),
+        // During an all-folder size sort, a fling suppresses cell answers without aborting its final order.
+        Request::DirSizeCancel => cancel_viewport(st),
         Request::Transfer { op, paths, rows, dest, menu_id } => {
             if menu_id != 0 {
                 start_menu_transfer(out, ops, &op, menu_id, &dest)
@@ -356,22 +355,22 @@ fn handle_line(
     Control::Continue
 }
 
-// A new row order invalidates every outstanding index, so the queue goes and no result can be reported against the new listing.
+// A rebuilt listing invalidates every row identity and every directory-size answer.
 pub fn forget_rows(st: &mut State, pool: &Pool) {
     st.outstanding = st.outstanding.saturating_sub(pool.cancel_all().len());
     st.asked.clear();
-    // A list or a sort changes which row an index names, the same reason thumbnails clear their map.
-    st.dirsizes.clear();
-    st.dirsize_queue.clear();
+    cancel_dirsizes(st, true);
 }
 
-// dirsize first: its rows are on screen now, while a search walk is work the client asked for and can wait a tick.
+// Sorting invalidates row identities and refreshes directory sizes, but their walks stay off this loop.
+fn reorder_rows(st: &mut State, pool: &Pool) {
+    st.outstanding = st.outstanding.saturating_sub(pool.cancel_all().len());
+    st.asked.clear();
+    cancel_dirsizes(st, true);
+}
+
 fn tick_walkers(out: &mut BufWriter<io::Stdout>, st: &mut State, pool: &Pool) {
-    if !st.dirsize_queue.is_empty() {
-        walk_one_dirsize(out, st);
-        return;
-    }
-    // A finished walk hands back its rows in ranked order, which renames every outstanding index.
+    // A finished search walk hands back its rows in ranked order, which renames every outstanding index.
     if step_search(out, st) {
         forget_rows(st, pool);
     }
@@ -387,6 +386,7 @@ fn drain(
     cache: &Cache,
 ) {
     let deadline = Instant::now() + DRAIN_LIMIT;
+    cancel_dirsizes(st, false);
     // A clean shutdown cancels the operation rather than abandoning it: a cancelled copy removes its own
     // partial destination, a file by copy_file and a tree by copy_dir, so quitting leaves nothing behind.
     if ops.running.is_some() {

@@ -1,5 +1,6 @@
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 // A directory over this deadline answers with what it saw, marked partial: a floor, not a wrong exact number.
@@ -11,11 +12,28 @@ pub struct DirSize {
 }
 
 // walk_until is the testable core: a test passes an already-past deadline to force partial without waiting 2000 ms.
+#[cfg(test)]
 pub fn walk(path: &Path) -> DirSize {
     walk_until(path, Instant::now() + Duration::from_millis(DEADLINE_MS))
 }
 
 pub fn walk_until(path: &Path, deadline: Instant) -> DirSize {
+    walk_impl(path, deadline, None).expect("an uncancellable walk always returns a result")
+}
+
+// A stale viewport is not a partial size: cancellation returns no answer and lets its one worker take the newest row.
+pub fn walk_cancellable(path: &Path, cancel: &AtomicBool) -> Option<DirSize> {
+    walk_impl(
+        path,
+        Instant::now() + Duration::from_millis(DEADLINE_MS),
+        Some(cancel),
+    )
+}
+
+fn walk_impl(path: &Path, deadline: Instant, cancel: Option<&AtomicBool>) -> Option<DirSize> {
+    if cancelled(cancel) {
+        return None;
+    }
     let mut bytes = 0u64;
     let mut partial = false;
     // The target's own directory entry counts too, matching what `du -s` reports for the directory itself.
@@ -23,28 +41,46 @@ pub fn walk_until(path: &Path, deadline: Instant) -> DirSize {
         Ok(meta) => bytes += meta.size(),
         Err(_) => partial = true,
     }
-    walk_into(path, deadline, &mut bytes, &mut partial);
-    DirSize { bytes, partial }
+    if !walk_into(path, deadline, cancel, &mut bytes, &mut partial) {
+        return None;
+    }
+    Some(DirSize { bytes, partial })
+}
+
+fn cancelled(cancel: Option<&AtomicBool>) -> bool {
+    cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
 }
 
 // Recursion, not an explicit stack: a tree deep enough to blow it is not a shape this one box produces.
-fn walk_into(path: &Path, deadline: Instant, bytes: &mut u64, partial: &mut bool) {
+fn walk_into(
+    path: &Path,
+    deadline: Instant,
+    cancel: Option<&AtomicBool>,
+    bytes: &mut u64,
+    partial: &mut bool,
+) -> bool {
+    if cancelled(cancel) {
+        return false;
+    }
     if Instant::now() >= deadline {
         *partial = true;
-        return;
+        return true;
     }
     let entries = match std::fs::read_dir(path) {
         Ok(rd) => rd,
         // Permission denied or vanished mid-walk: what was already counted stays, marked partial.
         Err(_) => {
             *partial = true;
-            return;
+            return true;
         }
     };
     for entry in entries {
+        if cancelled(cancel) {
+            return false;
+        }
         if Instant::now() >= deadline {
             *partial = true;
-            return;
+            return true;
         }
         let entry = match entry {
             Ok(e) => e,
@@ -78,10 +114,11 @@ fn walk_into(path: &Path, deadline: Instant, bytes: &mut u64, partial: &mut bool
             }
         };
         *bytes += meta.size();
-        if file_type.is_dir() {
-            walk_into(&entry.path(), deadline, bytes, partial);
+        if file_type.is_dir() && !walk_into(&entry.path(), deadline, cancel, bytes, partial) {
+            return false;
         }
     }
+    true
 }
 
 #[cfg(test)]
@@ -133,7 +170,10 @@ mod tests {
         let expected = fs::symlink_metadata(&d).unwrap().size()
             + fs::symlink_metadata(d.join("link")).unwrap().size();
         assert_eq!(result.bytes, expected);
-        assert!(result.bytes < 100_000, "the symlink's own small size counts, not the target it points at");
+        assert!(
+            result.bytes < 100_000,
+            "the symlink's own small size counts, not the target it points at"
+        );
     }
 
     #[test]
@@ -154,10 +194,16 @@ mod tests {
         fs::set_permissions(d.join("locked"), fs::Permissions::from_mode(0o000)).unwrap();
         let result = walk(&d);
         fs::set_permissions(d.join("locked"), fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(result.partial, "a subtree it could not read must mark partial");
+        assert!(
+            result.partial,
+            "a subtree it could not read must mark partial"
+        );
         let expected_min = fs::symlink_metadata(&d).unwrap().size()
             + fs::symlink_metadata(d.join("visible.txt")).unwrap().size();
-        assert!(result.bytes >= expected_min, "what the walk could see must still be counted");
+        assert!(
+            result.bytes >= expected_min,
+            "what the walk could see must still be counted"
+        );
     }
 
     #[test]
@@ -165,5 +211,13 @@ mod tests {
         let result = walk(Path::new("/definitely/not/here/flea-dirsize-test"));
         assert_eq!(result.bytes, 0);
         assert!(result.partial);
+    }
+
+    #[test]
+    fn a_cancelled_walk_returns_no_partial_answer() {
+        let (_sandbox, d) = fixture("dirsize-cancelled");
+        fs::write(d.join("a.txt"), "abc").unwrap();
+        let cancel = AtomicBool::new(true);
+        assert!(walk_cancellable(&d, &cancel).is_none());
     }
 }

@@ -1,6 +1,7 @@
 // Everything the read loop holds: the tables it parses once, and the listing state it mutates.
 use crate::backend::aliases::Aliases;
 use crate::backend::archive::Formats;
+use crate::backend::dirsizereq::{Job as DirSizeJob, PendingSort as DirSizeSort, Running as DirSizeRunning};
 use crate::backend::icons::Names;
 use crate::backend::kind::Kinds;
 use crate::backend::listing::Listing;
@@ -8,7 +9,7 @@ use crate::backend::mime::Db;
 use crate::backend::search::Search;
 use crate::backend::thumbspec::Thumbnailers;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -32,13 +33,17 @@ pub struct State {
     // Only the rows a client named, so this never grows with the directory; see AGENTS.md "Thumbnail requests".
     pub asked: Vec<(PathBuf, usize)>,
     pub outstanding: usize,
-    // Answered directory rows, kept until the next list or sort reassigns what a row index names.
-    pub dirsizes: HashMap<usize, (u64, bool)>,
-    // Rows still to walk, one at a time; dirsizecancel empties this without touching dirsizes.
-    pub dirsize_queue: Vec<usize>,
+    // Answered directory paths for the current listing and row order.
+    pub dirsizes: HashMap<PathBuf, (u64, bool)>,
+    // One background walker and the paths waiting behind it; a deque keeps all-folder sorts linear.
+    pub dirsize_running: Option<DirSizeRunning>,
+    pub dirsize_queue: VecDeque<DirSizeJob>,
+    pub dirsize_sort: Option<DirSizeSort>,
+    // Row generation changes on reorder/cancel; cache generation changes whenever those answers are invalidated.
+    pub dirsize_row_generation: u64,
+    pub dirsize_cache_generation: u64,
     // The subtree walk the loop ticks; None means no search is running.
     pub search: Option<Search>,
     // When the running walk last announced its count, so SEARCH_REPORT can throttle the stream.
     pub search_reported: Instant,
 }
-

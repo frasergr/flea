@@ -18,6 +18,7 @@ Item {
     signal failed(string where, string input, string message, int mode)
     signal thumbed(int row, string file)
     signal dirSized(int row, real bytes, bool partial)
+    signal dirSorted()
     signal searching(int total, int scanned, real ms)
     signal searched(int total, int scanned, real ms, bool cancelled)
     // The write operations, see docs/protocol.md; every one of them is reversible with undo.
@@ -284,8 +285,6 @@ Item {
     // Sample input: {"t":"rows","start":0,"rows":[{"n":"a.txt","d":false,"s":3,"m":1787790423,"p":33188,"i":"text-x-generic","t":false,"k":0}],"kinds":["Plain text document"],"ms":1.250}
     // Sample input: {"t":"thumbed","row":2,"file":"/home/gm/.cache/thumbnails/large/b98fa4.png","ms":75.823}
     // Sample input: {"t":"dirsized","row":4,"bytes":1048576,"partial":false,"ms":12.500}
-    // Sample input: {"t":"changed","path":"/home/gm/Downloads"}
-    // Sample input: {"t":"searching","n":812,"scanned":41200,"ms":300.114}
     // Sample input: {"t":"transferstarted","id":12,"n":2,"moving":true}
     // Sample input: {"t":"transferprogress","id":12,"index":0,"name":"a.txt","bytes":40000000,"total":120000000}
     // Sample input: {"t":"transferitem","id":12,"index":1,"name":"photos","ok":false,"err":"permission denied"}
@@ -315,6 +314,7 @@ Item {
             root.thumbed(message.row, message.file)
         } else if (message.t === "dirsized") {
             root.dirSized(message.row, message.bytes, message.partial)
+        } else if (message.t === "dirsorted") { root.dirSorted()
         } else if (message.t === "searching") {
             root.searching(message.n, message.scanned, message.ms)
         } else if (message.t === "searched") {
