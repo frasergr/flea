@@ -250,18 +250,18 @@ Item {
                 watchSettle.start()
         }
 
-        // A thumbed line for the previous listing is still in the pipe when open() clears the map.
         function onThumbed(row, file) {
-            if (!pane.listInFlight)
-                pane.thumbState = Thumbs.remember(pane.thumbState, row, file, pane.thumbCap)
+            if (!pane.listInFlight) pane.thumbState = Thumbs.remember(pane.thumbState, row, file, pane.thumbCap)
         }
-
-        // A dirsized line for the previous listing is still in the pipe when open() clears the map.
         function onDirSized(row, bytes, partial) {
-            if (!pane.listInFlight)
-                pane.dirSizeState = DirSizes.remember(pane.dirSizeState, row, bytes, partial, pane.thumbCap)
+            if (!pane.listInFlight) pane.dirSizeState = DirSizes.remember(pane.dirSizeState, row, bytes, partial, pane.thumbCap)
         }
-
+        // The backend completed every recursive key and reordered once; fetch fresh row-indexed surfaces.
+        function onDirSorted() {
+            pane.thumbState = Thumbs.empty(); pane.dirSizeState = DirSizes.empty()
+            pane.clearSelection(); pane.setCursor(0)
+            pane.backend.window(0, pane.windowSize)
+        }
         // Sample input: {"t":"transferstarted","id":12,"n":2,"moving":true}
         // The verb comes off the wire, never off the clipboard: paste spends a cut before this line
         // arrives, and a Dropbox move never touches the clipboard at all.

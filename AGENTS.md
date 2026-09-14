@@ -1008,8 +1008,8 @@ this coverage needed no new entry there.
   never started, which is the whole of what decides a `fail/` marker, see "Thumbnail pool".
 - `backend/thumbs.rs` the bounded, cancellable thumbnail pool, see "Thumbnail pool".
 - `backend/dirsize.rs` recursively totals one requested directory under a deadline and a cancellation flag.
-- `backend/dirsizereq.rs` keeps that work one-at-a-time on a background thread, caches completed
-  paths within one row order, and reports only against the row generation that requested it.
+- `backend/dirsizereq.rs` keeps that work one-at-a-time off the request loop, fills visible cells,
+  and completes a size order with one `dirsorted` reorder after every folder key is known.
 - `backend/proto.rs` the wire types, the request dispatch and the one-line responses.
 - `backend/rows.rs` serialises one window of rows and its per-response Kind dictionary.
 - `backend/thumbreq.rs` the thumbnail request policy: cache lookup, queueing, cancel and

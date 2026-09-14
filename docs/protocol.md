@@ -169,15 +169,17 @@ MIME lookup, not content probing.
 Inside each group, or across the whole listing when ungrouped, the key decides and
 the name order breaks ties, so two equal sizes list the same way every run, and
 `desc` is the exact reverse of ascending inside the group,
-tie-break included. A size order lists directories by name, because a directory's `st_size`
-is not a size anyone means; an mtime order lists them by time like everything else. The stat
-is the same `lstat` that `rows` reports `s` and `m` from, so the order always agrees with the
-column, symlinks included, and a row that vanished between the listing and the pass sorts as
-the zeroes `rows` would send for it.
+tie-break included. An mtime order lists directories by time like everything else. A size
+order has exact file sizes from the metadata pass immediately; directory rows first use name
+order because their own `st_size` is not a size anyone means. The backend then walks every
+directory one at a time off the request loop and emits `dirsorted` after applying the recursive
+sizes in one final reorder. The stat is the same `lstat` that `rows` reports `s` and `m` from,
+so file order always agrees with the column, symlinks included, and a row that vanished between
+the listing and the pass sorts as the zeroes `rows` would send for it.
 
-**Sort metadata is not retained between requests.** Reversing a size order stats the directory again,
-because a listing in name order must not carry metadata it is not using. The stats
-live for one request. Historical measurements from 2026-09-02, using the default
+**File sort metadata is not retained between requests.** Reversing a size order stats the
+directory again, because a listing in name order must not carry metadata it is not using.
+The stats live for one request. Historical measurements from 2026-09-02, using the default
 name ordering and directory grouping: on the 100,000 file fixture the backend's PSS
 read 4781 kB after the listing and
 4945 kB after a size sort (one `smaps_rollup` reading each), with a transient peak 3.2 MB
@@ -341,16 +343,16 @@ being deduplicated against the job that was just dropped.
 Example: `{"c":"dirsize","rows":[4,9]}`
 
 Asks for the recursive apparent size of those row indices, and answers one `dirsized` line
-per row that names a directory. **This is the only thing that ever walks a directory looking
-for size**, the same rule `thumb` follows for thumbnails: a row no client named is never
-walked. A row that is not a directory, or past the end of the listing, is skipped in silence.
+per row that names a directory. Normally only visible rows named by the client are walked.
+A size sort is the exception: it queues every directory because an exact recursive order needs
+every key, but only rows explicitly requested by `dirsize` emit intermediate cell answers.
+A row that is not a directory, or past the end of the listing, is skipped in silence.
 
 Unlike `thumb`, there is no thread pool: one background worker walks one directory at a
 time, so recursive IO never blocks the event loop that answers `sort`, `window` and every
-other request. Before starting each directory the loop drains newer requests (in particular
-`dirsizecancel`), and cancellation is checked throughout the active walk. A row already
-answered before the listing changes answers again at once from the path-keyed cache; a path
-already queued costs nothing extra.
+other request. Before starting each directory the loop drains newer requests, and cancellation
+is checked throughout the active walk. A row already answered before the listing changes
+answers again at once from the path-keyed cache; a path already queued costs nothing extra.
 
 **What the shipped client sends.** `ui/List.qml` sends `dirsize` only when the list settles, the
 same 120&nbsp;ms timer `thumb` already waits on, so a fling issues nothing at all. One request
@@ -360,13 +362,13 @@ names only the directory rows currently visible and not already known.
 
 `{"c":"dirsizecancel"}`
 
-Drops every directory path still queued and cancels the active walk. Unlike `thumbcancel`,
-there is no rows form: a stale path from a scrolled-past viewport would delay the row the
-new viewport actually wants, and the client always means "everything" when it sends this.
-Completed answers are untouched; cancelled work emits no partial result and no response line.
+Drops every viewport-only directory path still queued and cancels its active walk. During an
+all-folder size-sort pass, it instead suppresses obsolete cell answers while allowing the pass
+to finish; aborting it would leave Size permanently in its provisional name order. Cancelled
+viewport work emits no partial result and no response line.
 
-A directory a `dirsizecancel` dropped can be asked for again straight away: cancelling
-forgets pending work, so a later `dirsize` for it queues fresh work.
+A directory a viewport cancellation dropped can be asked for again straight away. During an
+all-folder pass the existing job is upgraded to report when its row becomes visible again.
 
 ### transfer
 
@@ -804,10 +806,22 @@ answered permission denied.** Either way `bytes` is a floor, honestly labelled, 
 exact number: everything the walk actually saw before it had to stop is still counted. The
 shipped client renders a partial answer with a leading `>`.
 
-**A result is never reported against a superseded row.** A `list` clears the path cache,
-cancels pending work and starts a fresh cache generation. A `sort` does the same: completed
-sizes are recomputed asynchronously in the new row order, so filesystem changes are reflected
-without putting the recursive walks back on the request loop.
+**A result is never reported against a superseded row.** A `list` or `sort` clears the path
+cache, cancels pending work and starts a fresh cache generation. A size order recomputes every
+directory asynchronously, then applies those recursive keys in one final reorder without
+putting the walks on the request loop.
+
+### dirsorted
+
+`{"t":"dirsorted"}`
+
+The all-folder pass for a size order completed and the backend applied its one final recursive
+size reorder. No rows ride on this signal. The client discards every row-indexed size and
+thumbnail mapping, resets to row zero, and requests a fresh window; visible directory sizes then
+answer from the completed path cache.
+
+Any `partial:true` size participates with its measured lower bound. Permission failures and the
+two-second per-folder deadline can therefore make the final order approximate for those folders.
 
 ### transferstarted
 

@@ -378,29 +378,33 @@ check "a repeated ask for an already-answered row still answers" "2" "$(echo "$o
 out=$(printf '{"c":"list","path":"%s","first":10}\n{"c":"dirsize","rows":[0]}\n{"c":"dirsizecancel"}\n{"c":"quit"}\n' "$DZ" | $BIN --backend)
 check "a row cancelled before it was walked is never answered" "0" "$(echo "$out" | grep -c '"t":"dirsized"')"
 
-# A sort changes row indices and refreshes every completed size without blocking the sort itself.
+# Size sort answers immediately in a stable provisional order, then refreshes and reorders folders once.
 SZ_SB="$FIXTURE_ROOT/flea-dirsize-sort-test-$$"
 SZ="$SZ_SB/tree"
 sandbox_make "$SZ_SB"
-mkdir -p "$SZ"
 mkdir -p "$SZ/aaa" "$SZ/zzz"
-printf 'abc' > "$SZ/aaa/small.txt"
-printf '%050d' 0 > "$SZ/zzz/bigger.txt"
+printf 'abc' > "$SZ/aaa/changed.txt"
+printf '%050d' 0 > "$SZ/zzz/fifty.txt"
 out=$(
   {
     printf '{"c":"list","path":"%s","first":10}\n{"c":"dirsize","rows":[0]}\n' "$SZ"
     sleep 0.3
-    printf '%0200d' 0 > "$SZ/aaa/small.txt"
-    printf '{"c":"sort","by":"name","desc":true}\n{"c":"dirsize","rows":[0,1]}\n'
+    printf '%0200d' 0 > "$SZ/aaa/changed.txt"
+    printf '{"c":"sort","by":"size","desc":true}\n{"c":"window","start":0,"count":10}\n'
+    sleep 0.3
+    printf '{"c":"window","start":0,"count":10}\n{"c":"dirsize","rows":[0,1]}\n'
     sleep 0.3
     printf '{"c":"quit"}\n'
   } | $BIN --backend
 )
-check "a sort answers both reordered paths with refreshed sizes" "3" "$(echo "$out" | grep -c '"t":"dirsized"')"
+check "an all-folder size pass announces one final reorder" "1" "$(echo "$out" | grep -c '"t":"dirsorted"')"
+final_rows=$(echo "$out" | grep '"t":"rows"' | sed -n '$p')
+check "recursive sizes override descending name order once complete" "aaa zzz" "$(echo "$final_rows" | row_names)"
+check "the final row order answers both sizes from its completed cache" "3" "$(echo "$out" | grep -c '"t":"dirsized"')"
 first_bytes=$(echo "$out" | grep -oE '"bytes":[0-9]+' | sed -n 1p | cut -d: -f2)
-refreshed_bytes=$(echo "$out" | grep -oE '"bytes":[0-9]+' | sed -n 3p | cut -d: -f2)
+refreshed_bytes=$(echo "$out" | grep -oE '"bytes":[0-9]+' | sed -n 2p | cut -d: -f2)
 [ -n "$first_bytes" ] && [ -n "$refreshed_bytes" ] && [ "$refreshed_bytes" -gt "$first_bytes" ] 2>/dev/null
-check "aaa's size is recomputed after its contents change and it moves to row 1" "0" "$?"
+check "the final order uses aaa's contents changed after its first answer" "0" "$?"
 sandbox_remove "$SZ_SB"; sandbox_remove "$DZ_SB"
 
 # A new folder: one mkdir(2), answered like rename and journaled so z removes it; see docs/protocol.md "mkdir".

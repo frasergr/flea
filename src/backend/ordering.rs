@@ -3,7 +3,8 @@ use super::meta::stat_all;
 use super::mime::Db;
 use super::sort::{name_order, parse_sort_by, sort_listing};
 use std::cmp::Ordering;
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 // Sample input: {"c":"list","by":"name","desc":false,"foldersFirst":true,"groupByKind":false}
@@ -13,22 +14,37 @@ pub fn request(
     mime: &Db,
     line: &str,
 ) -> Result<(f64, f64), &'static str> {
+    request_impl(l, base, mime, line, None)
+}
+
+pub fn request_with_dir_sizes(
+    l: &mut Listing,
+    base: &Path,
+    mime: &Db,
+    line: &str,
+    dir_sizes: &HashMap<PathBuf, (u64, bool)>,
+) -> Result<(f64, f64), &'static str> {
+    request_impl(l, base, mime, line, Some(dir_sizes))
+}
+
+fn request_impl(
+    l: &mut Listing,
+    base: &Path,
+    mime: &Db,
+    line: &str,
+    dir_sizes: Option<&HashMap<PathBuf, (u64, bool)>>,
+) -> Result<(f64, f64), &'static str> {
     let value = crate::jsondoc::parse(line).map_err(|_| "invalid ordering request")?;
     let default_by = if value.get("c").and_then(|v| v.as_str()) == Some("sort") { "" } else { "name" };
     let by = value.get("by").and_then(|v| v.as_str()).unwrap_or(default_by);
     let desc = value.get("desc").and_then(|v| v.as_bool()).unwrap_or(false);
-    let folders = value
-        .get("foldersFirst")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let groups = value
-        .get("groupByKind")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    ordered(l, base, mime, by, desc, folders, groups)
+    let folders = value.get("foldersFirst").and_then(|v| v.as_bool()).unwrap_or(true);
+    let groups = value.get("groupByKind").and_then(|v| v.as_bool()).unwrap_or(false);
+    ordered_impl(l, base, mime, by, desc, folders, groups, dir_sizes)
 }
 
 // The default retains the shipped fast path; explicit grouping needs only filename MIME lookup.
+#[cfg(test)]
 pub fn ordered(
     l: &mut Listing,
     base: &Path,
@@ -38,11 +54,24 @@ pub fn ordered(
     folders: bool,
     groups: bool,
 ) -> Result<(f64, f64), &'static str> {
+    ordered_impl(l, base, mime, by, desc, folders, groups, None)
+}
+
+fn ordered_impl(
+    l: &mut Listing,
+    base: &Path,
+    mime: &Db,
+    by: &str,
+    desc: bool,
+    folders: bool,
+    groups: bool,
+    dir_sizes: Option<&HashMap<PathBuf, (u64, bool)>>,
+) -> Result<(f64, f64), &'static str> {
     let by = if by == "date" { "mtime" } else { by };
     if !["name", "size", "mtime", "kind"].contains(&by) {
         return Err("no such sort key; send name, size, mtime or kind");
     }
-    if by != "kind" && folders && !groups {
+    if !(by == "size" && dir_sizes.is_some()) && by != "kind" && folders && !groups {
         return Ok(sort_listing(l, base, parse_sort_by(by)?, desc));
     }
     let (stats, pass_ms) = if by == "size" || by == "mtime" {
@@ -50,6 +79,22 @@ pub fn ordered(
         (Some(stats), ms)
     } else {
         (None, 0.0)
+    };
+    let sizes: Vec<u64> = if by == "size" {
+        let stats = stats.as_ref().unwrap();
+        (0..l.len())
+            .map(|i| {
+                if l.is_dir(i) {
+                    dir_sizes
+                        .and_then(|known| known.get(&base.join(l.name(i))))
+                        .map_or(0, |size| size.0)
+                } else {
+                    stats[i].size
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
     };
     let start = Instant::now();
     let kinds: Vec<&str> = if by == "kind" || groups {
@@ -79,12 +124,7 @@ pub fn ordered(
         }
         let key = match by {
             "kind" => kinds[a].cmp(kinds[b]),
-            "size" => {
-                let stats = stats.as_ref().unwrap();
-                let sa = if l.is_dir(a) { 0 } else { stats[a].size };
-                let sb = if l.is_dir(b) { 0 } else { stats[b].size };
-                sa.cmp(&sb)
-            }
+            "size" => sizes[a].cmp(&sizes[b]),
             "mtime" => {
                 let stats = stats.as_ref().unwrap();
                 stats[a].mtime.cmp(&stats[b].mtime)
@@ -92,11 +132,7 @@ pub fn ordered(
             _ => Ordering::Equal,
         };
         let order = key.then_with(|| name_order(l.name(a).as_bytes(), l.name(b).as_bytes()));
-        if desc {
-            order.reverse()
-        } else {
-            order
-        }
+        if desc { order.reverse() } else { order }
     });
     l.spans = indices.into_iter().map(|i| l.spans[i]).collect();
     Ok((pass_ms, start.elapsed().as_secs_f64() * 1000.0))
@@ -161,5 +197,46 @@ mod tests {
         ordered(&mut l, d.path(), &db, "kind", false, false, false).unwrap();
         assert_eq!(l.name(0), "c.jpg");
         assert!(ordered(&mut l, d.path(), &db, "bad", false, false, false).is_err());
+    }
+
+    #[test]
+    fn completed_recursive_sizes_order_folders_once_without_changing_file_semantics() {
+        let d = TestDir::new("recursive-size-order");
+        d.dir("a-large");
+        d.dir("z-small");
+        d.file("medium.bin", "12345");
+        let mut listing = Listing::new();
+        listing.push("a-large", true);
+        listing.push("z-small", true);
+        listing.push("medium.bin", false);
+        let sizes = HashMap::from([
+            (d.join("a-large"), (100, false)),
+            (d.join("z-small"), (1, false)),
+        ]);
+        let db = Db::from_str("");
+        request_with_dir_sizes(
+            &mut listing,
+            d.path(),
+            &db,
+            r#"{"c":"sort","by":"size","desc":false}"#,
+            &sizes,
+        )
+        .unwrap();
+        assert_eq!(
+            (listing.name(0), listing.name(1), listing.name(2)),
+            ("z-small", "a-large", "medium.bin")
+        );
+        request_with_dir_sizes(
+            &mut listing,
+            d.path(),
+            &db,
+            r#"{"c":"sort","by":"size","desc":true,"foldersFirst":false}"#,
+            &sizes,
+        )
+        .unwrap();
+        assert_eq!(
+            (listing.name(0), listing.name(1), listing.name(2)),
+            ("a-large", "medium.bin", "z-small")
+        );
     }
 }

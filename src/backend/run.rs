@@ -10,7 +10,7 @@ use crate::backend::metareq::spawn as spawn_meta;
 use crate::backend::opsdispatch::{cancel_transfer, do_mkdir, do_newfile, do_rename, do_undo, report_op, resolve_rows, start_duplicate, start_trash, start_transfer, start_menu_transfer, start_redo, Ops};
 use crate::backend::opsreq::OpMsg;
 use crate::backend::mime::Db;
-use crate::backend::dirsizereq::{cancel_dirsizes, queue_dirsizes, report_done as report_dirsize, start_next as start_next_dirsize};
+use crate::backend::dirsizereq::{begin_size_sort, cancel_dirsizes, cancel_viewport, queue_dirsizes, report_done as report_dirsize, start_next as start_next_dirsize};
 use crate::backend::events::{spawn_forwarder, spawn_op_forwarder, spawn_reader, Event};
 use crate::backend::fsinfo::{fsinfo_line, read as read_fsinfo};
 use crate::backend::fsinfo::dev_of;
@@ -73,8 +73,7 @@ pub fn run() -> i32 {
         asked: Vec::new(),
         outstanding: 0,
         dirsizes: HashMap::new(),
-        dirsize_running: None, dirsize_queue: Vec::new(),
-        dirsize_row_generation: 0, dirsize_cache_generation: 0,
+        dirsize_running: None, dirsize_queue: Default::default(), dirsize_sort: None, dirsize_row_generation: 0, dirsize_cache_generation: 0,
         search: None,
         search_reported: Instant::now(),
     };
@@ -97,7 +96,6 @@ pub fn run() -> i32 {
     // Armed before the first request, so no listing is ever answered with nothing watching it.
     let mut watch = Watch::start(tx.clone());
     loop {
-        // Queued requests are drained before a walk starts; a running size worker reports through rx.
         let dirsize_ready = st.dirsize_running.is_none() && !st.dirsize_queue.is_empty();
         let event = if st.search.is_none() && !dirsize_ready {
             match rx.recv() {
@@ -122,7 +120,7 @@ pub fn run() -> i32 {
                 }
             }
             Event::Thumb(d) => report_done(&mut out, &mut st, d),
-            Event::DirSize(d) => report_dirsize(&mut out, &mut st, d),
+            Event::DirSize(d) => report_dirsize(&mut out, &mut st, d, &tb.mime, &pool),
             // The one line no client asked for, and only ever for the directory being listed now.
             Event::Changed(wd) => {
                 if watch.is_current(wd) {
@@ -198,6 +196,7 @@ fn handle_line(
                     st.listing = l;
                     watch.commit();
                     forget_rows(st, pool);
+                    begin_size_sort(st, line);
                     // Said once per listing, because a folder nobody can watch goes stale in silence.
                     if watch.refused() {
                         eprintln!("flea: {} will not follow outside changes, inotify refused a watch on it", path);
@@ -258,6 +257,7 @@ fn handle_line(
                 }
                 Ok((pass_ms, sort_ms)) => {
                     reorder_rows(st, pool);
+                    begin_size_sort(st, line);
                     writeln!(out, "{}", listed_line(st.listing.len(), pass_ms, sort_ms, dev_of(&st.base))).ok();
                 }
             }
@@ -280,8 +280,8 @@ fn handle_line(
             }
         }
         Request::DirSize { rows } => queue_dirsizes(out, st, &rows),
-        // No rows form: stale IO is stopped too, so the next viewport does not wait behind it.
-        Request::DirSizeCancel => cancel_dirsizes(st, false),
+        // During an all-folder size sort, a fling suppresses cell answers without aborting its final order.
+        Request::DirSizeCancel => cancel_viewport(st),
         Request::Transfer { op, paths, rows, dest, menu_id } => {
             if menu_id != 0 {
                 start_menu_transfer(out, ops, &op, menu_id, &dest)

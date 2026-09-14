@@ -1,7 +1,7 @@
 // Everything the read loop holds: the tables it parses once, and the listing state it mutates.
 use crate::backend::aliases::Aliases;
 use crate::backend::archive::Formats;
-use crate::backend::dirsizereq::{Job as DirSizeJob, Running as DirSizeRunning};
+use crate::backend::dirsizereq::{Job as DirSizeJob, PendingSort as DirSizeSort, Running as DirSizeRunning};
 use crate::backend::icons::Names;
 use crate::backend::kind::Kinds;
 use crate::backend::listing::Listing;
@@ -9,7 +9,7 @@ use crate::backend::mime::Db;
 use crate::backend::search::Search;
 use crate::backend::thumbspec::Thumbnailers;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -35,10 +35,11 @@ pub struct State {
     pub outstanding: usize,
     // Answered directory paths for the current listing and row order.
     pub dirsizes: HashMap<PathBuf, (u64, bool)>,
-    // One background walker and the viewport-scoped paths waiting behind it.
+    // One background walker and the paths waiting behind it; a deque keeps all-folder sorts linear.
     pub dirsize_running: Option<DirSizeRunning>,
-    pub dirsize_queue: Vec<DirSizeJob>,
-    // Row generation changes on reorder/cancel; cache generation changes only when the listing is rebuilt.
+    pub dirsize_queue: VecDeque<DirSizeJob>,
+    pub dirsize_sort: Option<DirSizeSort>,
+    // Row generation changes on reorder/cancel; cache generation changes whenever those answers are invalidated.
     pub dirsize_row_generation: u64,
     pub dirsize_cache_generation: u64,
     // The subtree walk the loop ticks; None means no search is running.
