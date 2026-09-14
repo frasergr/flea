@@ -1,7 +1,8 @@
 // Every source of work the read loop waits on, and the threads that join them onto its one channel.
 // std has no select, so each blocking source is a thread and the loop only ever waits on the receiver.
+use crate::backend::dirsizereq::Done as DirSizeDone;
 use crate::backend::opsreq::OpMsg;
-use crate::backend::thumbs::Done;
+use crate::backend::thumbs::Done as ThumbDone;
 use crate::error::{from_io, FleaError};
 use std::io::{self, BufRead};
 use std::sync::mpsc::{Receiver, Sender};
@@ -10,7 +11,8 @@ use std::thread;
 // std has no select, so every source of work reaches the loop as one of these.
 pub enum Event {
     Request(String),
-    Thumb(Done),
+    Thumb(ThumbDone),
+    DirSize(DirSizeDone),
     // A write operation's own thread reports here, so the loop stays the only writer of stdout.
     Op(OpMsg),
     // The watch descriptor that saw it, so a burst belonging to the directory the client has already
@@ -51,7 +53,7 @@ pub fn spawn_op_forwarder(results: Receiver<OpMsg>, tx: Sender<Event>) {
 }
 
 // The pool answers on its own channel, so one thread joins the two onto the single receiver the loop waits on.
-pub fn spawn_forwarder(results: Receiver<Done>, tx: Sender<Event>) {
+pub fn spawn_forwarder(results: Receiver<ThumbDone>, tx: Sender<Event>) {
     thread::spawn(move || {
         for done in results {
             if tx.send(Event::Thumb(done)).is_err() {

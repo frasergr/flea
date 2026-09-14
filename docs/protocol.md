@@ -345,12 +345,12 @@ per row that names a directory. **This is the only thing that ever walks a direc
 for size**, the same rule `thumb` follows for thumbnails: a row no client named is never
 walked. A row that is not a directory, or past the end of the listing, is skipped in silence.
 
-Unlike `thumb`, there is no thread pool: the backend walks one directory at a time, inline in
-the same event loop that answers every other request. Between each directory it rechecks for a
-newer request (in particular `dirsizecancel`) before starting the next, so a walker never blocks
-the loop for longer than one directory's own 2000&nbsp;ms deadline. A row already answered for
-the current listing answers again at once from that cache; a row already queued costs nothing
-extra.
+Unlike `thumb`, there is no thread pool: one background worker walks one directory at a
+time, so recursive IO never blocks the event loop that answers `sort`, `window` and every
+other request. Before starting each directory the loop drains newer requests (in particular
+`dirsizecancel`), and cancellation is checked throughout the active walk. A row already
+answered for the current listing answers again at once from the path-keyed cache; a path
+already queued costs nothing extra.
 
 **What the shipped client sends.** `ui/List.qml` sends `dirsize` only when the list settles, the
 same 120&nbsp;ms timer `thumb` already waits on, so a fling issues nothing at all. One request
@@ -360,13 +360,13 @@ names only the directory rows currently visible and not already known.
 
 `{"c":"dirsizecancel"}`
 
-Drops every directory row still queued to be walked. Unlike `thumbcancel`, there is no rows
-form: the walker is one at a time, so a stale row left over from a scrolled-past viewport would
-delay the row the new viewport actually wants, and the client always means "everything" when it
-sends this. A row already answered is untouched; only the queue is cleared. No response line.
+Drops every directory path still queued and cancels the active walk. Unlike `thumbcancel`,
+there is no rows form: a stale path from a scrolled-past viewport would delay the row the
+new viewport actually wants, and the client always means "everything" when it sends this.
+Completed answers are untouched; cancelled work emits no partial result and no response line.
 
-A directory a `dirsizecancel` dropped can be asked for again straight away: cancelling forgets
-the row, so a later `dirsize` for it queues fresh work.
+A directory a `dirsizecancel` dropped can be asked for again straight away: cancelling
+forgets pending work, so a later `dirsize` for it queues fresh work.
 
 ### transfer
 
@@ -804,9 +804,10 @@ answered permission denied.** Either way `bytes` is a floor, honestly labelled, 
 exact number: everything the walk actually saw before it had to stop is still counted. The
 shipped client renders a partial answer with a leading `>`.
 
-**A result for a superseded listing is dropped, never reported against the current one.** A
-`list` or a `sort` clears the answered-row cache and cancels the queue, the same rule and the
-same reason `thumbed` follows: both change which row an index names.
+**A result is never reported against a superseded row.** A `list` clears the path cache,
+cancels pending work and starts a fresh cache generation. A `sort` cancels pending work but
+retains completed path-keyed answers, so the same directory at its new row answers without
+another recursive walk.
 
 ### transferstarted
 

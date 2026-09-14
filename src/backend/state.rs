@@ -1,6 +1,7 @@
 // Everything the read loop holds: the tables it parses once, and the listing state it mutates.
 use crate::backend::aliases::Aliases;
 use crate::backend::archive::Formats;
+use crate::backend::dirsizereq::{Job as DirSizeJob, Running as DirSizeRunning};
 use crate::backend::icons::Names;
 use crate::backend::kind::Kinds;
 use crate::backend::listing::Listing;
@@ -32,13 +33,16 @@ pub struct State {
     // Only the rows a client named, so this never grows with the directory; see AGENTS.md "Thumbnail requests".
     pub asked: Vec<(PathBuf, usize)>,
     pub outstanding: usize,
-    // Answered directory rows, kept until the next list or sort reassigns what a row index names.
-    pub dirsizes: HashMap<usize, (u64, bool)>,
-    // Rows still to walk, one at a time; dirsizecancel empties this without touching dirsizes.
-    pub dirsize_queue: Vec<usize>,
+    // Answered directory paths. Path identity survives a sort while row indices do not.
+    pub dirsizes: HashMap<PathBuf, (u64, bool)>,
+    // One background walker and the viewport-scoped paths waiting behind it.
+    pub dirsize_running: Option<DirSizeRunning>,
+    pub dirsize_queue: Vec<DirSizeJob>,
+    // Row generation changes on reorder/cancel; cache generation changes only when the listing is rebuilt.
+    pub dirsize_row_generation: u64,
+    pub dirsize_cache_generation: u64,
     // The subtree walk the loop ticks; None means no search is running.
     pub search: Option<Search>,
     // When the running walk last announced its count, so SEARCH_REPORT can throttle the stream.
     pub search_reported: Instant,
 }
-
