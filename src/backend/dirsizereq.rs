@@ -30,7 +30,7 @@ pub struct Done {
     ms: f64,
 }
 
-// Answered paths are re-answered at once; the path key survives a sort without confusing the row it moved to.
+// Answered paths are re-answered at once until a list or sort starts a fresh cache generation.
 pub fn queue_dirsizes(out: &mut BufWriter<io::Stdout>, st: &mut State, rows: &[usize]) {
     for &row in rows {
         if row >= st.listing.len() || !st.listing.is_dir(row) {
@@ -85,7 +85,7 @@ pub fn start_next(out: &mut BufWriter<io::Stdout>, st: &mut State, tx: &Sender<E
     out.flush().ok();
 }
 
-// A completion can fill the path cache after a sort, but only its original row generation may receive the line.
+// A completion may fill only its cache generation, and only its original row generation may receive the line.
 pub fn report_done(out: &mut BufWriter<io::Stdout>, st: &mut State, done: Done) {
     st.dirsize_running.take();
     let Some(result) = done.result else { return };

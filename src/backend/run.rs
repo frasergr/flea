@@ -362,11 +362,11 @@ pub fn forget_rows(st: &mut State, pool: &Pool) {
     cancel_dirsizes(st, true);
 }
 
-// Sorting invalidates row-indexed work, but completed directory sizes are keyed by path and remain valid.
+// Sorting invalidates row identities and refreshes directory sizes, but their walks stay off this loop.
 fn reorder_rows(st: &mut State, pool: &Pool) {
     st.outstanding = st.outstanding.saturating_sub(pool.cancel_all().len());
     st.asked.clear();
-    cancel_dirsizes(st, false);
+    cancel_dirsizes(st, true);
 }
 
 fn tick_walkers(out: &mut BufWriter<io::Stdout>, st: &mut State, pool: &Pool) {

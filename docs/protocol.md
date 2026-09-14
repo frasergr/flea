@@ -349,7 +349,7 @@ Unlike `thumb`, there is no thread pool: one background worker walks one directo
 time, so recursive IO never blocks the event loop that answers `sort`, `window` and every
 other request. Before starting each directory the loop drains newer requests (in particular
 `dirsizecancel`), and cancellation is checked throughout the active walk. A row already
-answered for the current listing answers again at once from the path-keyed cache; a path
+answered before the listing changes answers again at once from the path-keyed cache; a path
 already queued costs nothing extra.
 
 **What the shipped client sends.** `ui/List.qml` sends `dirsize` only when the list settles, the
@@ -805,9 +805,9 @@ exact number: everything the walk actually saw before it had to stop is still co
 shipped client renders a partial answer with a leading `>`.
 
 **A result is never reported against a superseded row.** A `list` clears the path cache,
-cancels pending work and starts a fresh cache generation. A `sort` cancels pending work but
-retains completed path-keyed answers, so the same directory at its new row answers without
-another recursive walk.
+cancels pending work and starts a fresh cache generation. A `sort` does the same: completed
+sizes are recomputed asynchronously in the new row order, so filesystem changes are reflected
+without putting the recursive walks back on the request loop.
 
 ### transferstarted
 

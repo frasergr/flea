@@ -33,7 +33,7 @@ pub struct State {
     // Only the rows a client named, so this never grows with the directory; see AGENTS.md "Thumbnail requests".
     pub asked: Vec<(PathBuf, usize)>,
     pub outstanding: usize,
-    // Answered directory paths. Path identity survives a sort while row indices do not.
+    // Answered directory paths for the current listing and row order.
     pub dirsizes: HashMap<PathBuf, (u64, bool)>,
     // One background walker and the viewport-scoped paths waiting behind it.
     pub dirsize_running: Option<DirSizeRunning>,
